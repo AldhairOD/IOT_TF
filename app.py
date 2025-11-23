@@ -1,5 +1,4 @@
 import os
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -445,11 +444,5 @@ else:
         st.error(f"Error consultando Supabase: {e}")
 
 # ================== AUTO-REFRESH ==================
-if auto_refresh:
-    # pequeño delay para no saturar
-    time.sleep(refresh_secs)
-    # Soporte para versiones nuevas y viejas de Streamlit
-    if hasattr(st, "experimental_rerun"):
-        st.experimental_rerun()
-    else:
-        st.rerun()
+if auto_refresh and hasattr(st, "autorefresh"):
+    st.autorefresh(interval=refresh_secs * 1000, key="rt_autorefresh")
