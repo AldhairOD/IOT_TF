@@ -5,7 +5,7 @@ from typing import Optional
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import paho.mqtt.client as mqtt
+import requests
 from supabase import create_client, Client
 
 # ================== CARGA DE SECRETOS ==================
@@ -19,17 +19,8 @@ def get_secret(name: str, default=None):
 SUPABASE_URL      = get_secret("SUPABASE_URL")
 SUPABASE_ANON_KEY = get_secret("SUPABASE_ANON_KEY")
 
-# por defecto usamos el broker público donde ya probaste mosquitto_pub
-MQTT_HOST         = get_secret("MQTT_HOST", "test.mosquitto.org")
-MQTT_PORT         = int(get_secret("MQTT_PORT", "1883"))
-MQTT_USER         = get_secret("MQTT_USER", "")
-MQTT_PASS         = get_secret("MQTT_PASS", "")
-
-# IMPORTANTE: estos defaults deben coincidir con tu ESP32
-TOPIC_CMD_ALARM   = get_secret("MQTT_TOPIC_CMD_ALARM",   "mauro-9f3a2/sjl/aire/cmd/alarm")
-TOPIC_CMD_FAN     = get_secret("MQTT_TOPIC_CMD_FAN",     "mauro-9f3a2/sjl/aire/cmd/fan")
-TOPIC_CMD_PWM     = get_secret("MQTT_TOPIC_CMD_FAN_PWM", "mauro-9f3a2/sjl/aire/cmd/fan_pwm")
-TOPIC_CMD_RECAL   = get_secret("MQTT_TOPIC_CMD_RECAL",   "mauro-9f3a2/sjl/aire/cmd/recal")
+# URL de tu backend bridge (FastAPI/Flask) que realmente envía a MQTT
+BRIDGE_URL        = get_secret("BRIDGE_URL", "http://localhost:8000/cmd")
 
 # ================== NOMBRES AMIGABLES DE MÉTRICAS ==================
 METRIC_LABELS = {
@@ -57,9 +48,6 @@ except Exception as e:
     sb_client = None
     init_supabase_error = f"Error creando cliente Supabase: {e}"
 
-# ================== MQTT CLIENT (SOLO PARA ENVIAR COMANDOS) ==================
-mqtt_client = mqtt.Client()
-
 # ================== CONFIG STREAMLIT ==================
 st.set_page_config(
     page_title="SJL Aire - IoT Dashboard",
@@ -68,55 +56,51 @@ st.set_page_config(
 )
 
 # ================== ESTADO GLOBAL ==================
-if "mqtt_started" not in st.session_state:
-    st.session_state.mqtt_started = False
-
-if "mqtt_error" not in st.session_state:
-    st.session_state.mqtt_error = None
-
 if "supabase_error" not in st.session_state:
     st.session_state.supabase_error = init_supabase_error
 
-# ================== CONEXIÓN MQTT (comandos) ==================
-def start_mqtt_if_needed():
-    # Si ya está conectado o falló antes, no intentamos de nuevo
-    if st.session_state.mqtt_started or st.session_state.mqtt_error:
-        return
+# ================== FUNCIONES HTTP → BRIDGE MQTT ==================
+def debug_http(payload: dict):
+    debug_text = (
+        "===== DEBUG HTTP → BRIDGE MQTT =====\n"
+        f"BRIDGE_URL: {BRIDGE_URL}\n"
+        f"JSON:       {payload}\n"
+        "====================================\n"
+    )
+    print(debug_text)
+    st.sidebar.code(debug_text, language="text")
 
-    if MQTT_USER:
-        mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
+def call_bridge(cmd_type: str, value: Optional[str] = None):
+    payload = {"type": cmd_type}
+    if value is not None:
+        payload["value"] = value
+
+    debug_http(payload)
 
     try:
-        mqtt_client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+        resp = requests.post(BRIDGE_URL, json=payload, timeout=5)
+        if resp.status_code != 200:
+            st.sidebar.error(f"Bridge respondió {resp.status_code}: {resp.text}")
+        else:
+            # opcional: mostrar respuesta corta
+            st.sidebar.success(f"Bridge OK: {resp.json()}")
     except Exception as e:
-        err = f"No se pudo conectar a MQTT ({MQTT_HOST}:{MQTT_PORT}): {e}"
-        st.session_state.mqtt_error = err
-        st.sidebar.error(err)
-        return
+        st.sidebar.error(f"Error llamando al bridge: {e}")
 
-    mqtt_client.loop_start()
-    st.session_state.mqtt_started = True
-
-# ================== FUNCIONES MQTT COMANDOS ==================
 def send_alarm(on: bool):
-    msg = "ON" if on else "OFF"
-    debug_publish(TOPIC_CMD_ALARM, msg)
-    mqtt_client.publish(TOPIC_CMD_ALARM, msg, qos=0, retain=False)
+    value = "ON" if on else "OFF"
+    call_bridge("alarm", value)
 
 def send_fan(on: bool):
-    msg = "ON" if on else "OFF"
-    debug_publish(TOPIC_CMD_FAN, msg)
-    mqtt_client.publish(TOPIC_CMD_FAN, msg, qos=0, retain=False)
+    value = "ON" if on else "OFF"
+    call_bridge("fan", value)
 
 def send_fan_pwm(pct: int):
     pct = max(0, min(100, pct))
-    msg = str(pct)
-    debug_publish(TOPIC_CMD_PWM, msg)
-    mqtt_client.publish(TOPIC_CMD_PWM, msg, qos=0, retain=False)
+    call_bridge("fan_pwm", str(pct))
 
 def send_recal():
-    debug_publish(TOPIC_CMD_RECAL, "NOW")
-    mqtt_client.publish(TOPIC_CMD_RECAL, "NOW", qos=0, retain=False)
+    call_bridge("recal", None)
 
 # ================== QUERIES A SUPABASE ==================
 @st.cache_data(ttl=5)
@@ -164,29 +148,9 @@ def load_status(from_iso: str, device_id: Optional[str]):
         q = q.eq("device_id", device_id)
     return q.execute().data
 
-def debug_publish(topic, payload):
-    debug_text = (
-        "===== DEBUG MQTT PUBLISH =====\n"
-        f"Host:        {MQTT_HOST}\n"
-        f"Port:        {MQTT_PORT}\n"
-        f"Topic:       {topic}\n"
-        f"Payload:     {payload}\n"
-        f"IsConnected: {mqtt_client.is_connected()}\n"
-        "================================\n"
-    )
-    # Esto va a los logs (Manage app -> Logs en Streamlit Cloud)
-    print(debug_text)
-    # Esto lo ves en la barra lateral cada vez que mandas algo
-    st.sidebar.code(debug_text, language="text")
-
 # ================== SIDEBAR ==================
 with st.sidebar:
     st.markdown("## ⚙️ Configuración")
-
-    start_mqtt_if_needed()
-
-    if st.session_state.mqtt_error:
-        st.error(st.session_state.mqtt_error)
 
     auto_refresh = st.checkbox(
         "Auto-refrescar tiempo real",
@@ -212,7 +176,7 @@ with st.sidebar:
     hist_hours = st.slider("Ventana histórica (horas)", 1, 72, 24)
 
     st.markdown("---")
-    st.markdown("### Comandos MQTT")
+    st.markdown("### Comandos (vía bridge HTTP → MQTT)")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -234,18 +198,13 @@ with st.sidebar:
     if st.button("Enviar PWM"):
         send_fan_pwm(pwm_val)
 
-    # Botón debug opcional: manda PWM=30 EXACTAMENTE como probaste con mosquitto_pub
-    if st.button("Probar PWM 30 directo"):
-        mqtt_client.publish("mauro-9f3a2/sjl/aire/cmd/fan_pwm", "30", qos=0, retain=False)
-        st.success("Enviado 30 a mauro-9f3a2/sjl/aire/cmd/fan_pwm")
-
     if st.button("♻️ Recalibrar sensores (RECAL)"):
         send_recal()
 
     st.markdown("---")
     st.caption(
-        "MQTT conectado a: "
-        f"`{MQTT_HOST}:{MQTT_PORT}`\n\n"
+        "Bridge HTTP: "
+        f"`{BRIDGE_URL or 'no configurado'}`\n\n"
         "Supabase URL: "
         f"`{SUPABASE_URL or 'no configurado'}`"
     )
@@ -271,7 +230,7 @@ st.markdown(
 
 st.markdown('<div class="big-title">🌫️ SJL Aire – Dashboard IoT</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Monitoreo de CO₂, compuestos volátiles, temperatura y humedad, con control de actuadores en tiempo casi real (lectura desde base de datos).</div>',
+    '<div class="subtitle">Monitoreo de CO₂, compuestos volátiles, temperatura y humedad, con control de actuadores vía bridge HTTP → MQTT (lectura desde base de datos Supabase).</div>',
     unsafe_allow_html=True
 )
 st.markdown("---")
@@ -470,6 +429,6 @@ else:
         st.session_state.supabase_error = str(e)
         st.error(f"Error consultando Supabase: {e}")
 
-# ================== AUTO-REFRESH (SIN time.sleep) ==================
+# ================== AUTO-REFRESH ==================
 if auto_refresh and hasattr(st, "autorefresh"):
     st.autorefresh(interval=refresh_secs * 1000, key="rt_autorefresh")
