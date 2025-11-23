@@ -196,7 +196,7 @@ def drain_realtime_queue(max_pull: int = 500):
 with st.sidebar:
     st.markdown("## ⚙️ Configuración")
 
-    start_mqtt_if_needed()
+    # start_mqtt_if_needed()
 
     if st.session_state.mqtt_error:
         st.error(st.session_state.mqtt_error)
