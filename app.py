@@ -448,4 +448,8 @@ else:
 if auto_refresh:
     # pequeño delay para no saturar
     time.sleep(refresh_secs)
-    st.experimental_rerun()
+    # Soporte para versiones nuevas y viejas de Streamlit
+    if hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    else:
+        st.rerun()
