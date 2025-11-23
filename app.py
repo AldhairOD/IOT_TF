@@ -100,17 +100,22 @@ def start_mqtt_if_needed():
 # ================== FUNCIONES MQTT COMANDOS ==================
 def send_alarm(on: bool):
     msg = "ON" if on else "OFF"
+    debug_publish(TOPIC_CMD_ALARM, msg)
     mqtt_client.publish(TOPIC_CMD_ALARM, msg, qos=0, retain=False)
 
 def send_fan(on: bool):
     msg = "ON" if on else "OFF"
+    debug_publish(TOPIC_CMD_FAN, msg)
     mqtt_client.publish(TOPIC_CMD_FAN, msg, qos=0, retain=False)
 
 def send_fan_pwm(pct: int):
     pct = max(0, min(100, pct))
-    mqtt_client.publish(TOPIC_CMD_PWM, str(pct), qos=0, retain=False)
+    msg = str(pct)
+    debug_publish(TOPIC_CMD_PWM, msg)
+    mqtt_client.publish(TOPIC_CMD_PWM, msg, qos=0, retain=False)
 
 def send_recal():
+    debug_publish(TOPIC_CMD_RECAL, "NOW")
     mqtt_client.publish(TOPIC_CMD_RECAL, "NOW", qos=0, retain=False)
 
 # ================== QUERIES A SUPABASE ==================
@@ -158,6 +163,15 @@ def load_status(from_iso: str, device_id: Optional[str]):
     if device_id:
         q = q.eq("device_id", device_id)
     return q.execute().data
+
+def debug_publish(topic, payload):
+    print("\n===== DEBUG MQTT PUBLISH =====")
+    print(f"Host:     {MQTT_HOST}")
+    print(f"Port:     {MQTT_PORT}")
+    print(f"Topic:    {topic}")
+    print(f"Payload:  {payload}")
+    print(f"IsConnected: {mqtt_client.is_connected()}")
+    print("================================\n")
 
 # ================== SIDEBAR ==================
 with st.sidebar:
