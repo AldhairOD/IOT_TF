@@ -445,7 +445,7 @@ else:
         st.error(f"Error consultando Supabase: {e}")
 
 # ================== AUTO-REFRESH ==================
-if auto_refresh:
+#if auto_refresh:
     # pequeño delay para no saturar
-    time.sleep(refresh_secs)
-    st.experimental_rerun()
+    #time.sleep(refresh_secs)
+    #st.experimental_rerun()
