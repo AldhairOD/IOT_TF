@@ -30,15 +30,18 @@ TOPIC_CMD_FAN     = get_secret("MQTT_TOPIC_CMD_FAN", "sjl/aire/cmd/fan")
 TOPIC_CMD_PWM     = get_secret("MQTT_TOPIC_CMD_FAN_PWM", "sjl/aire/cmd/fan_pwm")
 TOPIC_CMD_RECAL   = get_secret("MQTT_TOPIC_CMD_RECAL", "sjl/aire/cmd/recal")
 
-# Mapping técnico → nombre amigable
+# ================== NOMBRES AMIGABLES DE MÉTRICAS ==================
 METRIC_LABELS = {
-    "temp_c": "Temperatura (°C)",
+    "temp_c":  "Temperatura (°C)",
     "hum_pct": "Humedad relativa (%)",
-    "co_raw": "CO₂ (ppm)",
+    "co_raw":  "CO₂ (ppm)",
     "voc_raw": "Comp. volátiles (VOC)",
 }
 
-metric_keys = list(METRIC_LABELS.keys())
+def metric_label(key: str) -> str:
+    return METRIC_LABELS.get(key, key)
+
+BASE_METRICS = list(METRIC_LABELS.keys())
 
 # ================== SUPABASE CLIENT (con manejo de error) ==================
 sb_client: Optional[Client] = None
@@ -143,7 +146,7 @@ def load_history(from_iso: str, device_id: Optional[str]):
 @st.cache_data(ttl=300)  # 5 minutos
 def load_status(from_iso: str, device_id: Optional[str]):
     """
-    Datos para 'Estado actual' (solo se refresca cada 5 min).
+    Datos para 'Estado actual' (se refresca cada 5 min como máximo).
     """
     q = (
         sb_client.table("telemetry")
@@ -178,9 +181,9 @@ with st.sidebar:
 
     filter_metric_rt = st.multiselect(
         "Métricas en tiempo real",
-        options=metric_keys,
-        default=metric_keys,   # por defecto: las 4 métricas
-        format_func=lambda k: METRIC_LABELS.get(k, k)
+        options=BASE_METRICS,
+        default=BASE_METRICS,
+        format_func=metric_label
     )
 
     st.markdown("---")
@@ -279,17 +282,14 @@ with col_rt:
                     df_rt = df_rt.sort_values("ts_dt")
                     df_rt["ts_local"] = df_rt["ts_dt"].dt.tz_convert("America/Lima")
 
-                    # nombre amigable de métrica
-                    df_rt["metric_name"] = df_rt["metric"].map(
-                        lambda m: METRIC_LABELS.get(m, m)
-                    )
+                    df_rt["metric_name"] = df_rt["metric"].map(metric_label)
 
                     fig_rt = px.line(
                         df_rt,
                         x="ts_local",
                         y="value",
                         color="metric_name",
-                        hover_data=["device_id"],
+                        hover_data=["device_id", "metric"],
                         labels={"value": "Valor", "ts_local": "Hora local", "metric_name": "Métrica"}
                     )
                     fig_rt.update_layout(
@@ -308,9 +308,9 @@ with col_rt:
             st.error(f"Error cargando datos en tiempo real desde Supabase: {e}")
             st.session_state.supabase_error = str(e)
 
-# ================== ESTADO ACTUAL (cada 5 minutos) ==================
+# ================== ESTADO ACTUAL (snapshot de una sola lectura) ==================
 with col_cards:
-    st.subheader("🔎 Estado actual (última muestra en BD, refresco cada 5 min)")
+    st.subheader("🔎 Estado actual (última lectura en BD, refresco cada 5 min)")
 
     if not sb_client:
         msg = st.session_state.supabase_error or "Supabase no está configurado."
@@ -328,21 +328,25 @@ with col_cards:
                 st.info("Aún no hay lecturas recientes para mostrar resumen.")
             else:
                 df_last["ts_dt"] = pd.to_datetime(df_last["ts"], utc=True)
-                df_last = df_last.sort_values("ts_dt", ascending=False)
 
-                # última hora registrada en general
-                last_ts = df_last["ts_dt"].iloc[0].tz_convert("America/Lima")
-                st.markdown(f"**Última actualización:** {last_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+                # Timestamp de la ÚLTIMA lectura
+                last_ts = df_last["ts_dt"].max()
+                df_snapshot = df_last[df_last["ts_dt"] == last_ts]
 
-                # Últimas lecturas por métrica
-                def last_value(metric_key: str):
-                    row = df_last[df_last["metric"] == metric_key].head(1)
-                    return row["value"].iloc[0] if not row.empty else None
+                # Diccionario metric -> value con TODAS las métricas de ESA lectura
+                last_values = {
+                    row["metric"]: row["value"]
+                    for _, row in df_snapshot.iterrows()
+                }
 
-                temp_val = last_value("temp_c")
-                hum_val  = last_value("hum_pct")
-                co_val   = last_value("co_raw")
-                voc_val  = last_value("voc_raw")
+                last_ts_local = last_ts.tz_convert("America/Lima")
+                st.markdown(f"**Última actualización:** {last_ts_local.strftime('%Y-%m-%d %H:%M:%S')}")
+
+                # Extraer cada métrica del diccionario
+                temp_val = last_values.get("temp_c")
+                hum_val  = last_values.get("hum_pct")
+                co_val   = last_values.get("co_raw")
+                voc_val  = last_values.get("voc_raw")
 
                 c1, c2 = st.columns(2)
                 with c1:
@@ -393,9 +397,9 @@ else:
         else:
             metric_hist = st.multiselect(
                 "Métricas a mostrar en el histórico",
-                options=metric_keys,
+                options=BASE_METRICS,
                 default=["temp_c", "hum_pct"],
-                format_func=lambda k: METRIC_LABELS.get(k, k)
+                format_func=metric_label
             )
             if metric_hist:
                 df_hist = df_hist[df_hist["metric"].isin(metric_hist)]
@@ -406,16 +410,14 @@ else:
                 df_hist["ts_dt"] = pd.to_datetime(df_hist["ts"], utc=True)
                 df_hist = df_hist.sort_values("ts_dt")
                 df_hist["ts_local"] = df_hist["ts_dt"].dt.tz_convert("America/Lima")
-                df_hist["metric_name"] = df_hist["metric"].map(
-                    lambda m: METRIC_LABELS.get(m, m)
-                )
+                df_hist["metric_name"] = df_hist["metric"].map(metric_label)
 
                 fig_hist = px.line(
                     df_hist,
                     x="ts_local",
                     y="value",
                     color="metric_name",
-                    hover_data=["device_id"],
+                    hover_data=["device_id", "metric"],
                     labels={"value": "Valor", "ts_local": "Fecha/hora local", "metric_name": "Métrica"}
                 )
                 fig_hist.update_layout(
