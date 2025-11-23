@@ -19,15 +19,17 @@ def get_secret(name: str, default=None):
 SUPABASE_URL      = get_secret("SUPABASE_URL")
 SUPABASE_ANON_KEY = get_secret("SUPABASE_ANON_KEY")
 
-MQTT_HOST         = get_secret("MQTT_HOST", "localhost")
+# por defecto usamos el broker público donde ya probaste mosquitto_pub
+MQTT_HOST         = get_secret("MQTT_HOST", "test.mosquitto.org")
 MQTT_PORT         = int(get_secret("MQTT_PORT", "1883"))
 MQTT_USER         = get_secret("MQTT_USER", "")
 MQTT_PASS         = get_secret("MQTT_PASS", "")
 
-TOPIC_CMD_ALARM   = get_secret("MQTT_TOPIC_CMD_ALARM", "sjl/aire/cmd/alarm")
-TOPIC_CMD_FAN     = get_secret("MQTT_TOPIC_CMD_FAN", "sjl/aire/cmd/fan")
-TOPIC_CMD_PWM     = get_secret("MQTT_TOPIC_CMD_FAN_PWM", "sjl/aire/cmd/fan_pwm")
-TOPIC_CMD_RECAL   = get_secret("MQTT_TOPIC_CMD_RECAL", "sjl/aire/cmd/recal")
+# IMPORTANTE: estos defaults deben coincidir con tu ESP32
+TOPIC_CMD_ALARM   = get_secret("MQTT_TOPIC_CMD_ALARM",   "mauro-9f3a2/sjl/aire/cmd/alarm")
+TOPIC_CMD_FAN     = get_secret("MQTT_TOPIC_CMD_FAN",     "mauro-9f3a2/sjl/aire/cmd/fan")
+TOPIC_CMD_PWM     = get_secret("MQTT_TOPIC_CMD_FAN_PWM", "mauro-9f3a2/sjl/aire/cmd/fan_pwm")
+TOPIC_CMD_RECAL   = get_secret("MQTT_TOPIC_CMD_RECAL",   "mauro-9f3a2/sjl/aire/cmd/recal")
 
 # ================== NOMBRES AMIGABLES DE MÉTRICAS ==================
 METRIC_LABELS = {
@@ -169,7 +171,7 @@ with st.sidebar:
     auto_refresh = st.checkbox(
         "Auto-refrescar tiempo real",
         value=True,
-        help="Si está activo, la vista se actualiza cada ~2 segundos"
+        help="Si está activo, la vista se actualiza cada N segundos"
     )
     refresh_secs = st.slider("Intervalo de refresco (s)", 1, 10, 2)
 
@@ -211,6 +213,11 @@ with st.sidebar:
     pwm_val = st.slider("Fan PWM (%)", 0, 100, 40)
     if st.button("Enviar PWM"):
         send_fan_pwm(pwm_val)
+
+    # Botón debug opcional: manda PWM=30 EXACTAMENTE como probaste con mosquitto_pub
+    if st.button("Probar PWM 30 directo"):
+        mqtt_client.publish("mauro-9f3a2/sjl/aire/cmd/fan_pwm", "30", qos=0, retain=False)
+        st.success("Enviado 30 a mauro-9f3a2/sjl/aire/cmd/fan_pwm")
 
     if st.button("♻️ Recalibrar sensores (RECAL)"):
         send_recal()
@@ -307,7 +314,7 @@ with col_rt:
             st.error(f"Error cargando datos en tiempo real desde Supabase: {e}")
             st.session_state.supabase_error = str(e)
 
-# ================== ESTADO ACTUAL (snapshot de una sola lectura) ==================
+# ================== ESTADO ACTUAL (última lectura completa) ==================
 with col_cards:
     st.subheader("🔎 Estado actual (última lectura en BD, refresco cada 5 min)")
 
@@ -443,6 +450,6 @@ else:
         st.session_state.supabase_error = str(e)
         st.error(f"Error consultando Supabase: {e}")
 
-# ================== AUTO-REFRESH ==================
+# ================== AUTO-REFRESH (SIN time.sleep) ==================
 if auto_refresh and hasattr(st, "autorefresh"):
     st.autorefresh(interval=refresh_secs * 1000, key="rt_autorefresh")
