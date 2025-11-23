@@ -165,13 +165,19 @@ def load_status(from_iso: str, device_id: Optional[str]):
     return q.execute().data
 
 def debug_publish(topic, payload):
-    print("\n===== DEBUG MQTT PUBLISH =====")
-    print(f"Host:     {MQTT_HOST}")
-    print(f"Port:     {MQTT_PORT}")
-    print(f"Topic:    {topic}")
-    print(f"Payload:  {payload}")
-    print(f"IsConnected: {mqtt_client.is_connected()}")
-    print("================================\n")
+    debug_text = (
+        "===== DEBUG MQTT PUBLISH =====\n"
+        f"Host:        {MQTT_HOST}\n"
+        f"Port:        {MQTT_PORT}\n"
+        f"Topic:       {topic}\n"
+        f"Payload:     {payload}\n"
+        f"IsConnected: {mqtt_client.is_connected()}\n"
+        "================================\n"
+    )
+    # Esto va a los logs (Manage app -> Logs en Streamlit Cloud)
+    print(debug_text)
+    # Esto lo ves en la barra lateral cada vez que mandas algo
+    st.sidebar.code(debug_text, language="text")
 
 # ================== SIDEBAR ==================
 with st.sidebar:
