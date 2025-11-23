@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -28,6 +29,16 @@ TOPIC_CMD_ALARM   = get_secret("MQTT_TOPIC_CMD_ALARM", "sjl/aire/cmd/alarm")
 TOPIC_CMD_FAN     = get_secret("MQTT_TOPIC_CMD_FAN", "sjl/aire/cmd/fan")
 TOPIC_CMD_PWM     = get_secret("MQTT_TOPIC_CMD_FAN_PWM", "sjl/aire/cmd/fan_pwm")
 TOPIC_CMD_RECAL   = get_secret("MQTT_TOPIC_CMD_RECAL", "sjl/aire/cmd/recal")
+
+# Mapping técnico → nombre amigable
+METRIC_LABELS = {
+    "temp_c": "Temperatura (°C)",
+    "hum_pct": "Humedad relativa (%)",
+    "co_raw": "CO₂ (ppm)",
+    "voc_raw": "Comp. volátiles (VOC)",
+}
+
+metric_keys = list(METRIC_LABELS.keys())
 
 # ================== SUPABASE CLIENT (con manejo de error) ==================
 sb_client: Optional[Client] = None
@@ -62,9 +73,9 @@ if "mqtt_error" not in st.session_state:
 if "supabase_error" not in st.session_state:
     st.session_state.supabase_error = init_supabase_error
 
-# ================== CONEXIÓN MQTT (con try/except y sin intentos infinitos) ==================
+# ================== CONEXIÓN MQTT (comandos) ==================
 def start_mqtt_if_needed():
-    # Si ya está conectado o ya falló antes, no intentamos de nuevo
+    # Si ya está conectado o falló antes, no intentamos de nuevo
     if st.session_state.mqtt_started or st.session_state.mqtt_error:
         return
 
@@ -79,7 +90,6 @@ def start_mqtt_if_needed():
         st.sidebar.error(err)
         return
 
-    # loop_start: mantiene la conexión en un hilo interno
     mqtt_client.loop_start()
     st.session_state.mqtt_started = True
 
@@ -103,7 +113,7 @@ def send_recal():
 @st.cache_data(ttl=5)
 def load_realtime(from_iso: str, device_id: Optional[str]):
     """
-    Carga datos de los últimos ~3 minutos desde la tabla telemetry.
+    Datos últimos ~3 minutos.
     """
     q = (
         sb_client.table("telemetry")
@@ -118,7 +128,22 @@ def load_realtime(from_iso: str, device_id: Optional[str]):
 @st.cache_data(ttl=30)
 def load_history(from_iso: str, device_id: Optional[str]):
     """
-    Carga datos históricos desde la tabla telemetry.
+    Datos históricos.
+    """
+    q = (
+        sb_client.table("telemetry")
+        .select("ts, device_id, metric, value")
+        .gte("ts", from_iso)
+        .order("ts", desc=False)
+    )
+    if device_id:
+        q = q.eq("device_id", device_id)
+    return q.execute().data
+
+@st.cache_data(ttl=300)  # 5 minutos
+def load_status(from_iso: str, device_id: Optional[str]):
+    """
+    Datos para 'Estado actual' (solo se refresca cada 5 min).
     """
     q = (
         sb_client.table("telemetry")
@@ -149,14 +174,13 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Filtros generales")
 
-    # En este TP probablemente solo uses un device, pero dejo campo
     filter_device = st.text_input("Device ID (vacío = todos)", value="")
 
-    metric_options = ["co_raw", "voc_raw", "temp_c", "hum_pct"]
     filter_metric_rt = st.multiselect(
         "Métricas en tiempo real",
-        metric_options,
-        default=["temp_c", "hum_pct"]
+        options=metric_keys,
+        default=metric_keys,   # por defecto: las 4 métricas
+        format_func=lambda k: METRIC_LABELS.get(k, k)
     )
 
     st.markdown("---")
@@ -218,7 +242,7 @@ st.markdown(
 
 st.markdown('<div class="big-title">🌫️ SJL Aire – Dashboard IoT</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Monitoreo de calidad de aire, temperatura, humedad y control de actuadores en tiempo casi real (lectura desde base de datos).</div>',
+    '<div class="subtitle">Monitoreo de CO₂, compuestos volátiles, temperatura y humedad, con control de actuadores en tiempo casi real (lectura desde base de datos).</div>',
     unsafe_allow_html=True
 )
 st.markdown("---")
@@ -244,6 +268,7 @@ with col_rt:
             if df_rt.empty:
                 st.info("No hay datos en la ventana de tiempo real con estos filtros.")
             else:
+                # filtrar métricas seleccionadas
                 if filter_metric_rt:
                     df_rt = df_rt[df_rt["metric"].isin(filter_metric_rt)]
 
@@ -254,13 +279,18 @@ with col_rt:
                     df_rt = df_rt.sort_values("ts_dt")
                     df_rt["ts_local"] = df_rt["ts_dt"].dt.tz_convert("America/Lima")
 
+                    # nombre amigable de métrica
+                    df_rt["metric_name"] = df_rt["metric"].map(
+                        lambda m: METRIC_LABELS.get(m, m)
+                    )
+
                     fig_rt = px.line(
                         df_rt,
                         x="ts_local",
                         y="value",
-                        color="metric",
+                        color="metric_name",
                         hover_data=["device_id"],
-                        labels={"value": "Valor", "ts_local": "Hora local"}
+                        labels={"value": "Valor", "ts_local": "Hora local", "metric_name": "Métrica"}
                     )
                     fig_rt.update_layout(
                         height=380,
@@ -278,8 +308,9 @@ with col_rt:
             st.error(f"Error cargando datos en tiempo real desde Supabase: {e}")
             st.session_state.supabase_error = str(e)
 
+# ================== ESTADO ACTUAL (cada 5 minutos) ==================
 with col_cards:
-    st.subheader("🔎 Estado actual (última muestra en BD)")
+    st.subheader("🔎 Estado actual (última muestra en BD, refresco cada 5 min)")
 
     if not sb_client:
         msg = st.session_state.supabase_error or "Supabase no está configurado."
@@ -287,10 +318,10 @@ with col_cards:
     else:
         try:
             now_utc = datetime.now(timezone.utc)
-            t_from = now_utc - timedelta(minutes=60)  # buscamos en la última hora
+            t_from = now_utc - timedelta(hours=1)  # buscamos en la última hora
             t_from_iso = t_from.isoformat()
 
-            data_last = load_realtime(t_from_iso, filter_device)
+            data_last = load_status(t_from_iso, filter_device)
             df_last = pd.DataFrame(data_last)
 
             if df_last.empty:
@@ -303,17 +334,20 @@ with col_cards:
                 last_ts = df_last["ts_dt"].iloc[0].tz_convert("America/Lima")
                 st.markdown(f"**Última actualización:** {last_ts.strftime('%Y-%m-%d %H:%M:%S')}")
 
-                # última temp y humedad
-                temp_row = df_last[df_last["metric"] == "temp_c"].head(1)
-                hum_row  = df_last[df_last["metric"] == "hum_pct"].head(1)
+                # Últimas lecturas por métrica
+                def last_value(metric_key: str):
+                    row = df_last[df_last["metric"] == metric_key].head(1)
+                    return row["value"].iloc[0] if not row.empty else None
 
-                temp_val = temp_row["value"].iloc[0] if not temp_row.empty else None
-                hum_val  = hum_row["value"].iloc[0] if not hum_row.empty else None
+                temp_val = last_value("temp_c")
+                hum_val  = last_value("hum_pct")
+                co_val   = last_value("co_raw")
+                voc_val  = last_value("voc_raw")
 
                 c1, c2 = st.columns(2)
                 with c1:
                     st.metric(
-                        "🌡️ Temp (°C)",
+                        "🌡️ Temperatura (°C)",
                         f"{temp_val:.1f}" if temp_val is not None else "-"
                     )
                 with c2:
@@ -322,27 +356,16 @@ with col_cards:
                         f"{hum_val:.1f}" if hum_val is not None else "-"
                     )
 
-                # si decides guardar fan_pct y alarm_on como métricas, puedes mostrarlos aquí
-                fan_row   = df_last[df_last["metric"] == "fan_pct"].head(1)
-                alarm_row = df_last[df_last["metric"] == "alarm_on"].head(1)
-
-                fan_val = fan_row["value"].iloc[0] if not fan_row.empty else None
-                alarm_val_raw = alarm_row["value"].iloc[0] if not alarm_row.empty else None
-                alarm_on = None
-                if alarm_val_raw is not None:
-                    # interpretamos >0 como ON
-                    alarm_on = bool(alarm_val_raw)
-
                 c3, c4 = st.columns(2)
                 with c3:
                     st.metric(
-                        "🛑 Alarma",
-                        "ON" if alarm_on else ("OFF" if alarm_on is not None else "-")
+                        "🧪 CO₂ (ppm)",
+                        f"{co_val:.0f}" if co_val is not None else "-"
                     )
                 with c4:
                     st.metric(
-                        "🌀 Ventilador (%)",
-                        int(fan_val) if fan_val is not None else "-"
+                        "☁️ VOC",
+                        f"{voc_val:.0f}" if voc_val is not None else "-"
                     )
 
         except Exception as e:
@@ -370,8 +393,9 @@ else:
         else:
             metric_hist = st.multiselect(
                 "Métricas a mostrar en el histórico",
-                metric_options,
-                default=["temp_c", "hum_pct"]
+                options=metric_keys,
+                default=["temp_c", "hum_pct"],
+                format_func=lambda k: METRIC_LABELS.get(k, k)
             )
             if metric_hist:
                 df_hist = df_hist[df_hist["metric"].isin(metric_hist)]
@@ -382,14 +406,17 @@ else:
                 df_hist["ts_dt"] = pd.to_datetime(df_hist["ts"], utc=True)
                 df_hist = df_hist.sort_values("ts_dt")
                 df_hist["ts_local"] = df_hist["ts_dt"].dt.tz_convert("America/Lima")
+                df_hist["metric_name"] = df_hist["metric"].map(
+                    lambda m: METRIC_LABELS.get(m, m)
+                )
 
                 fig_hist = px.line(
                     df_hist,
                     x="ts_local",
                     y="value",
-                    color="metric",
+                    color="metric_name",
                     hover_data=["device_id"],
-                    labels={"value": "Valor", "ts_local": "Fecha/hora local"}
+                    labels={"value": "Valor", "ts_local": "Fecha/hora local", "metric_name": "Métrica"}
                 )
                 fig_hist.update_layout(
                     height=380,
@@ -406,7 +433,7 @@ else:
 
                 with st.expander("Ver datos en tabla"):
                     st.dataframe(
-                        df_hist[["ts_local", "device_id", "metric", "value"]],
+                        df_hist[["ts_local", "device_id", "metric_name", "value"]],
                         use_container_width=True,
                         height=260
                     )
