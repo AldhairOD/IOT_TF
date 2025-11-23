@@ -20,14 +20,14 @@ SUPABASE_URL      = get_secret("SUPABASE_URL")
 SUPABASE_ANON_KEY = get_secret("SUPABASE_ANON_KEY")
 
 # URL de tu backend bridge (FastAPI/Flask) que realmente envía a MQTT
-BRIDGE_URL        = get_secret("BRIDGE_URL", "http://localhost:8000/cmd")
+BRIDGE_URL        = get_secret("BRIDGE_URL", "http://127.0.0.1:8000/cmd")
 
 # ================== NOMBRES AMIGABLES DE MÉTRICAS ==================
 METRIC_LABELS = {
     "temp_c":  "Temperatura (°C)",
     "hum_pct": "Humedad relativa (%)",
     "co_raw":  "CO₂ (ppm)",
-    "voc_raw": "Comp. volátiles (VOC)",
+    "voc_raw": "Compuestos volátiles (VOC)",
 }
 
 def metric_label(key: str) -> str:
@@ -43,14 +43,14 @@ try:
     if SUPABASE_URL and SUPABASE_ANON_KEY:
         sb_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     else:
-        init_supabase_error = "Faltan SUPABASE_URL o SUPABASE_ANON_KEY."
+        init_supabase_error = "Faltan credenciales de almacenamiento de datos."
 except Exception as e:
     sb_client = None
-    init_supabase_error = f"Error creando cliente Supabase: {e}"
+    init_supabase_error = f"Ocurrió un problema al conectarse al almacenamiento de datos: {e}"
 
 # ================== CONFIG STREAMLIT ==================
 st.set_page_config(
-    page_title="SJL Aire - IoT Dashboard",
+    page_title="SJL Aire - Panel de calidad de aire",
     page_icon="🌫️",
     layout="wide"
 )
@@ -59,7 +59,7 @@ st.set_page_config(
 if "supabase_error" not in st.session_state:
     st.session_state.supabase_error = init_supabase_error
 
-# ================== FUNCIONES HTTP → BRIDGE MQTT ==================
+# ================== FUNCIONES HTTP → BRIDGE MQTT (NO TOCAR ENVÍO) ==================
 def debug_http(payload: dict):
     debug_text = (
         "===== DEBUG HTTP → BRIDGE MQTT =====\n"
@@ -82,7 +82,6 @@ def call_bridge(cmd_type: str, value: Optional[str] = None):
         if resp.status_code != 200:
             st.sidebar.error(f"Bridge respondió {resp.status_code}: {resp.text}")
         else:
-            # opcional: mostrar respuesta corta
             st.sidebar.success(f"Bridge OK: {resp.json()}")
     except Exception as e:
         st.sidebar.error(f"Error llamando al bridge: {e}")
@@ -102,42 +101,54 @@ def send_fan_pwm(pct: int):
 def send_recal():
     call_bridge("recal", None)
 
-# ================== QUERIES A SUPABASE ==================
-@st.cache_data(ttl=5)
-def load_realtime(from_iso: str, device_id: Optional[str]):
-    """
-    Datos últimos ~3 minutos.
-    """
+# ================== QUERIES A SUPABASE (POR MÉTRICA) ==================
+# -- Real time: 4 consultas (1 por métrica) cada ~10 s --
+
+@st.cache_data(ttl=10)  # se re-ejecuta como máximo cada 10 s
+def load_metric_window(metric: str, minutes: int, device_id: Optional[str]):
+    if not sb_client:
+        return []
+    now_utc = datetime.now(timezone.utc)
+    t_from = now_utc - timedelta(minutes=minutes)
+    t_from_iso = t_from.isoformat()
+
     q = (
         sb_client.table("telemetry")
         .select("ts, device_id, metric, value")
-        .gte("ts", from_iso)
+        .eq("metric", metric)
+        .gte("ts", t_from_iso)
         .order("ts", desc=False)
     )
     if device_id:
         q = q.eq("device_id", device_id)
     return q.execute().data
+
+# -- Estado actual: 4 consultas (1 por métrica) cada ~10 s --
+
+@st.cache_data(ttl=10)
+def load_last_metric(metric: str, device_id: Optional[str]):
+    if not sb_client:
+        return None
+    q = (
+        sb_client.table("telemetry")
+        .select("ts, device_id, metric, value")
+        .eq("metric", metric)
+        .order("ts", desc=True)
+        .limit(1)
+    )
+    if device_id:
+        q = q.eq("device_id", device_id)
+    data = q.execute().data
+    if not data:
+        return None
+    return data[0]
+
+# -- Histórico (puede seguir siendo 1 consulta) --
 
 @st.cache_data(ttl=30)
 def load_history(from_iso: str, device_id: Optional[str]):
-    """
-    Datos históricos.
-    """
-    q = (
-        sb_client.table("telemetry")
-        .select("ts, device_id, metric, value")
-        .gte("ts", from_iso)
-        .order("ts", desc=False)
-    )
-    if device_id:
-        q = q.eq("device_id", device_id)
-    return q.execute().data
-
-@st.cache_data(ttl=300)  # 5 minutos
-def load_status(from_iso: str, device_id: Optional[str]):
-    """
-    Datos para 'Estado actual' (se refresca cada 5 min como máximo).
-    """
+    if not sb_client:
+        return []
     q = (
         sb_client.table("telemetry")
         .select("ts, device_id, metric, value")
@@ -153,60 +164,59 @@ with st.sidebar:
     st.markdown("## ⚙️ Configuración")
 
     auto_refresh = st.checkbox(
-        "Auto-refrescar tiempo real",
+        "Actualizar automáticamente",
         value=True,
-        help="Si está activo, la vista se actualiza cada N segundos"
+        help="Si está activo, la vista se actualiza sola cada cierto tiempo."
     )
-    refresh_secs = st.slider("Intervalo de refresco (s)", 1, 10, 2)
+    refresh_secs = st.slider("Intervalo de actualización (segundos)", 5, 30, 10)
 
     st.markdown("---")
-    st.markdown("### Filtros generales")
+    st.markdown("### Filtros")
 
-    filter_device = st.text_input("Device ID (vacío = todos)", value="")
+    # Si quieres permitir filtrar por dispositivo, lo usamos pero NO se muestra en el gráfico
+    filter_device = st.text_input("Identificador de dispositivo (opcional)", value="")
 
     filter_metric_rt = st.multiselect(
-        "Métricas en tiempo real",
+        "Variables a mostrar en tiempo real",
         options=BASE_METRICS,
         default=BASE_METRICS,
         format_func=metric_label
     )
 
     st.markdown("---")
-    st.markdown("### Histórico")
+    st.markdown("### Rango histórico")
     hist_hours = st.slider("Ventana histórica (horas)", 1, 72, 24)
 
     st.markdown("---")
-    st.markdown("### Comandos (vía bridge HTTP → MQTT)")
+    st.markdown("### Control del sistema (comandos)")
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔔 Alarm ON"):
+        if st.button("Activar alarma"):
             send_alarm(True)
     with c2:
-        if st.button("🔕 Alarm OFF"):
+        if st.button("Desactivar alarma"):
             send_alarm(False)
 
     c3, c4 = st.columns(2)
     with c3:
-        if st.button("🌀 Fan ON (100%)"):
+        if st.button("Encender ventilación (100%)"):
             send_fan(True)
     with c4:
-        if st.button("🧊 Fan OFF"):
+        if st.button("Apagar ventilación"):
             send_fan(False)
 
-    pwm_val = st.slider("Fan PWM (%)", 0, 100, 40)
-    if st.button("Enviar PWM"):
+    pwm_val = st.slider("Velocidad de ventilación (%)", 0, 100, 40)
+    if st.button("Aplicar velocidad"):
         send_fan_pwm(pwm_val)
 
-    if st.button("♻️ Recalibrar sensores (RECAL)"):
+    if st.button("Recalibrar sensores"):
         send_recal()
 
     st.markdown("---")
     st.caption(
-        "Bridge HTTP: "
-        f"`{BRIDGE_URL or 'no configurado'}`\n\n"
-        "Supabase URL: "
-        f"`{SUPABASE_URL or 'no configurado'}`"
+        f"Conexión a servicios internos establecida.\n"
+        f"Almacenamiento de datos: `{'configurado' if SUPABASE_URL else 'no configurado'}`"
     )
 
 # ================== HEADER ==================
@@ -228,160 +238,146 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.markdown('<div class="big-title">🌫️ SJL Aire – Dashboard IoT</div>', unsafe_allow_html=True)
+st.markdown('<div class="big-title">🌫️ SJL Aire – Panel de calidad del aire interior</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="subtitle">Monitoreo de CO₂, compuestos volátiles, temperatura y humedad, con control de actuadores vía bridge HTTP → MQTT (lectura desde base de datos Supabase).</div>',
+    '<div class="subtitle">Monitoreo de CO₂, compuestos volátiles, temperatura y humedad, con control de ventilación y alarma.</div>',
     unsafe_allow_html=True
 )
 st.markdown("---")
 
-# ================== REALTIME DESDE BD ==================
+# ================== REALTIME DESDE BD (4 QUERIES) ==================
 col_rt, col_cards = st.columns([2.5, 1.5])
 
 with col_rt:
-    st.subheader("📡 Tiempo real (últimos ~3 minutos) desde BD")
+    st.subheader("📡 Tiempo real (últimos 3 minutos)")
 
     if not sb_client:
-        msg = st.session_state.supabase_error or "Supabase no está configurado (revise URL y ANON KEY)."
+        msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
         st.warning(msg)
     else:
-        now_utc = datetime.now(timezone.utc)
-        t_from = now_utc - timedelta(minutes=3)
-        t_from_iso = t_from.isoformat()
+        # 4 consultas, una por variable (lo que pediste)
+        dfs = []
+        for metric in filter_metric_rt:
+            data_m = load_metric_window(metric, minutes=3, device_id=filter_device or None)
+            df_m = pd.DataFrame(data_m)
+            if not df_m.empty:
+                df_m["metric"] = metric
+                dfs.append(df_m)
 
-        try:
-            data_rt = load_realtime(t_from_iso, filter_device)
-            df_rt = pd.DataFrame(data_rt)
+        if not dfs:
+            st.info("No hay datos recientes para las variables seleccionadas.")
+        else:
+            df_rt = pd.concat(dfs, ignore_index=True)
 
-            if df_rt.empty:
-                st.info("No hay datos en la ventana de tiempo real con estos filtros.")
-            else:
-                # filtrar métricas seleccionadas
-                if filter_metric_rt:
-                    df_rt = df_rt[df_rt["metric"].isin(filter_metric_rt)]
+            df_rt["ts_dt"] = pd.to_datetime(df_rt["ts"], utc=True)
+            df_rt = df_rt.sort_values("ts_dt")
+            df_rt["ts_local"] = df_rt["ts_dt"].dt.tz_convert("America/Lima")
 
-                if df_rt.empty:
-                    st.info("No hay datos para las métricas seleccionadas.")
-                else:
-                    df_rt["ts_dt"] = pd.to_datetime(df_rt["ts"], utc=True)
-                    df_rt = df_rt.sort_values("ts_dt")
-                    df_rt["ts_local"] = df_rt["ts_dt"].dt.tz_convert("America/Lima")
+            df_rt["metric_name"] = df_rt["metric"].map(metric_label)
 
-                    df_rt["metric_name"] = df_rt["metric"].map(metric_label)
-
-                    fig_rt = px.line(
-                        df_rt,
-                        x="ts_local",
-                        y="value",
-                        color="metric_name",
-                        hover_data=["device_id", "metric"],
-                        labels={"value": "Valor", "ts_local": "Hora local", "metric_name": "Métrica"}
-                    )
-                    fig_rt.update_layout(
-                        height=380,
-                        margin=dict(l=10, r=10, t=10, b=10),
-                        legend=dict(
-                            orientation="h",
-                            yanchor="bottom",
-                            y=1.02,
-                            xanchor="right",
-                            x=1
-                        )
-                    )
-                    st.plotly_chart(fig_rt, use_container_width=True, theme="streamlit")
-        except Exception as e:
-            st.error(f"Error cargando datos en tiempo real desde Supabase: {e}")
-            st.session_state.supabase_error = str(e)
-
-# ================== ESTADO ACTUAL (última lectura completa) ==================
-with col_cards:
-    st.subheader("🔎 Estado actual (última lectura en BD, refresco cada 5 min)")
-
-    if not sb_client:
-        msg = st.session_state.supabase_error or "Supabase no está configurado."
-        st.warning(msg)
-    else:
-        try:
-            now_utc = datetime.now(timezone.utc)
-            t_from = now_utc - timedelta(hours=1)  # buscamos en la última hora
-            t_from_iso = t_from.isoformat()
-
-            data_last = load_status(t_from_iso, filter_device)
-            df_last = pd.DataFrame(data_last)
-
-            if df_last.empty:
-                st.info("Aún no hay lecturas recientes para mostrar resumen.")
-            else:
-                df_last["ts_dt"] = pd.to_datetime(df_last["ts"], utc=True)
-
-                # Timestamp de la ÚLTIMA lectura
-                last_ts = df_last["ts_dt"].max()
-                df_snapshot = df_last[df_last["ts_dt"] == last_ts]
-
-                # Diccionario metric -> value con TODAS las métricas de ESA lectura
-                last_values = {
-                    row["metric"]: row["value"]
-                    for _, row in df_snapshot.iterrows()
+            fig_rt = px.line(
+                df_rt,
+                x="ts_local",
+                y="value",
+                color="metric_name",
+                # NO mostramos device_id ni nombres de columnas crudos
+                hover_data={"ts_local": True, "value": True, "metric_name": True},
+                labels={
+                    "value": "Valor medido",
+                    "ts_local": "Hora local",
+                    "metric_name": "Variable"
                 }
+            )
+            fig_rt.update_layout(
+                height=380,
+                margin=dict(l=10, r=10, t=10, b=10),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            st.plotly_chart(fig_rt, use_container_width=True, theme="streamlit")
 
-                last_ts_local = last_ts.tz_convert("America/Lima")
-                st.markdown(f"**Última actualización:** {last_ts_local.strftime('%Y-%m-%d %H:%M:%S')}")
+# ================== ESTADO ACTUAL (4 SELECTS) ==================
+with col_cards:
+    st.subheader("🔎 Estado actual (actualización cada 10 s)")
 
-                # Extraer cada métrica del diccionario
-                temp_val = last_values.get("temp_c")
-                hum_val  = last_values.get("hum_pct")
-                co_val   = last_values.get("co_raw")
-                voc_val  = last_values.get("voc_raw")
+    if not sb_client:
+        msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
+        st.warning(msg)
+    else:
+        # 4 consultas: una por cada variable de interés
+        last_temp = load_last_metric("temp_c", filter_device or None)
+        last_hum  = load_last_metric("hum_pct", filter_device or None)
+        last_co   = load_last_metric("co_raw",  filter_device or None)
+        last_voc  = load_last_metric("voc_raw", filter_device or None)
 
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric(
-                        "🌡️ Temperatura (°C)",
-                        f"{temp_val:.1f}" if temp_val is not None else "-"
-                    )
-                with c2:
-                    st.metric(
-                        "💧 Humedad (%)",
-                        f"{hum_val:.1f}" if hum_val is not None else "-"
-                    )
+        # Determinar el timestamp más reciente disponible
+        ts_candidates = [
+            pd.to_datetime(x["ts"], utc=True) for x in
+            [last_temp, last_hum, last_co, last_voc] if x is not None
+        ]
 
-                c3, c4 = st.columns(2)
-                with c3:
-                    st.metric(
-                        "🧪 CO₂ (ppm)",
-                        f"{co_val:.0f}" if co_val is not None else "-"
-                    )
-                with c4:
-                    st.metric(
-                        "☁️ VOC",
-                        f"{voc_val:.0f}" if voc_val is not None else "-"
-                    )
+        if not ts_candidates:
+            st.info("Aún no hay lecturas recientes para mostrar el estado actual.")
+        else:
+            last_ts = max(ts_candidates)
+            last_ts_local = last_ts.tz_convert("America/Lima")
+            st.markdown(f"**Última actualización:** {last_ts_local.strftime('%Y-%m-%d %H:%M:%S')}")
 
-        except Exception as e:
-            st.error(f"Error cargando estado actual desde Supabase: {e}")
-            st.session_state.supabase_error = str(e)
+            temp_val = last_temp["value"] if last_temp else None
+            hum_val  = last_hum["value"] if last_hum else None
+            co_val   = last_co["value"] if last_co else None
+            voc_val  = last_voc["value"] if last_voc else None
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.metric(
+                    "🌡️ Temperatura (°C)",
+                    f"{temp_val:.1f}" if temp_val is not None else "–"
+                )
+            with c2:
+                st.metric(
+                    "💧 Humedad relativa (%)",
+                    f"{hum_val:.1f}" if hum_val is not None else "–"
+                )
+
+            c3, c4 = st.columns(2)
+            with c3:
+                st.metric(
+                    "🧪 CO₂ (ppm)",
+                    f"{co_val:.0f}" if co_val is not None else "–"
+                )
+            with c4:
+                st.metric(
+                    "☁️ Compuestos volátiles (VOC)",
+                    f"{voc_val:.0f}" if voc_val is not None else "–"
+                )
 
 st.markdown("---")
 
 # ================== HISTÓRICO DESDE SUPABASE ==================
-st.subheader(f"📈 Histórico (últimas {hist_hours} h desde BD)")
+st.subheader(f"📈 Histórico (últimas {hist_hours} horas)")
 
 if not sb_client:
-    msg = st.session_state.supabase_error or "Supabase no está configurado (revise URL y ANON KEY)."
+    msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
     st.warning(msg)
 else:
     try:
         t_from = datetime.now(timezone.utc) - timedelta(hours=hist_hours)
         t_from_iso = t_from.isoformat()
 
-        data_hist = load_history(t_from_iso, filter_device)
+        data_hist = load_history(t_from_iso, filter_device or None)
         df_hist = pd.DataFrame(data_hist)
 
         if df_hist.empty:
-            st.info("No hay datos históricos en Supabase para este rango/filtros.")
+            st.info("No hay datos históricos para este rango.")
         else:
             metric_hist = st.multiselect(
-                "Métricas a mostrar en el histórico",
+                "Variables a mostrar en el histórico",
                 options=BASE_METRICS,
                 default=["temp_c", "hum_pct"],
                 format_func=metric_label
@@ -390,7 +386,7 @@ else:
                 df_hist = df_hist[df_hist["metric"].isin(metric_hist)]
 
             if df_hist.empty:
-                st.info("No hay datos para las métricas seleccionadas en este rango.")
+                st.info("No hay datos para las variables seleccionadas en este rango.")
             else:
                 df_hist["ts_dt"] = pd.to_datetime(df_hist["ts"], utc=True)
                 df_hist = df_hist.sort_values("ts_dt")
@@ -402,8 +398,12 @@ else:
                     x="ts_local",
                     y="value",
                     color="metric_name",
-                    hover_data=["device_id", "metric"],
-                    labels={"value": "Valor", "ts_local": "Fecha/hora local", "metric_name": "Métrica"}
+                    hover_data={"ts_local": True, "value": True, "metric_name": True},
+                    labels={
+                        "value": "Valor medido",
+                        "ts_local": "Fecha y hora",
+                        "metric_name": "Variable"
+                    }
                 )
                 fig_hist.update_layout(
                     height=380,
@@ -420,14 +420,14 @@ else:
 
                 with st.expander("Ver datos en tabla"):
                     st.dataframe(
-                        df_hist[["ts_local", "device_id", "metric_name", "value"]],
+                        df_hist[["ts_local", "metric_name", "value"]],
                         use_container_width=True,
                         height=260
                     )
 
     except Exception as e:
         st.session_state.supabase_error = str(e)
-        st.error(f"Error consultando Supabase: {e}")
+        st.error(f"Ocurrió un problema al consultar los datos históricos: {e}")
 
 # ================== AUTO-REFRESH ==================
 if auto_refresh and hasattr(st, "autorefresh"):
