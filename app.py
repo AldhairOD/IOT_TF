@@ -90,7 +90,7 @@ def send_fan(on: bool):
     call_bridge("fan", value)
 
 def send_fan_pwm(pct: int):
-    pct = max(0, min(100, pct))
+    pct = max(0, min(70, pct))
     call_bridge("fan_pwm", str(pct))
 
 def send_recal():
@@ -197,7 +197,7 @@ with st.sidebar:
 
     c3, c4 = st.columns(2)
     with c3:
-        if st.button("Encender ventilación (100%)"):
+        if st.button("Encender ventilación"):
             send_fan(True)
     with c4:
         if st.button("Apagar ventilación"):
