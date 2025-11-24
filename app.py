@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-
+import time   
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -423,5 +423,7 @@ else:
 
 # ================== AUTO-REFRESH ==================
 if auto_refresh:
-    # Cada refresh_secs segundos se vuelve a ejecutar TODO el script
-    st.autorefresh(interval=refresh_secs * 1000, key="rt_autorefresh")
+    # Espera la cantidad de segundos elegida
+    time.sleep(refresh_secs)
+    # Vuelve a ejecutar TODO el script (vuelve a consultar Supabase)
+    st.experimental_rerun()
