@@ -4,4 +4,4 @@ pandas
 paho-mqtt
 supabase
 python-dotenv
-autorefresh
+streamlit-autorefresh
