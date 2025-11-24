@@ -203,7 +203,7 @@ with st.sidebar:
         if st.button("Apagar ventilación"):
             send_fan(False)
 
-    pwm_val = st.slider("Velocidad de ventilación (%)", 0, 100, 40)
+    pwm_val = st.slider("Velocidad de ventilación (%)", 0, 70, 40)
     if st.button("Aplicar velocidad"):
         send_fan_pwm(pwm_val)
 
@@ -246,7 +246,7 @@ st.markdown("---")
 col_rt, col_cards = st.columns([2.5, 1.5])
 
 with col_rt:
-    st.subheader("📡 Tiempo real (últimos 3 minutos)")
+    st.subheader("📡 Tiempo real")
 
     if not sb_client:
         msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
@@ -297,7 +297,7 @@ with col_rt:
 
 # ================== ESTADO ACTUAL (4 SELECTS) ==================
 with col_cards:
-    st.subheader("🔎 Estado actual (actualización frecuente)")
+    st.subheader("🔎 Estado actual")
 
     if not sb_client:
         msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
