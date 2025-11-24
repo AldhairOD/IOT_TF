@@ -86,9 +86,8 @@ def send_alarm(on: bool):
     call_bridge("alarm", value)
 
 def send_fan(on: bool):
-    value = "ON" if on else "OFF"
-    call_bridge("fan", value)
-
+    call_bridge("fan_pwm", str(70))
+    
 def send_fan_pwm(pct: int):
     pct = max(0, min(70, pct))
     call_bridge("fan_pwm", str(pct))
