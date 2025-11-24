@@ -43,7 +43,7 @@ try:
     if SUPABASE_URL and SUPABASE_ANON_KEY:
         sb_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     else:
-        init_supabase_error = "Faltan credenciales de almacenamiento de datos."
+        init_supabase_error = "Faltan credenciales para el almacenamiento de datos."
 except Exception as e:
     sb_client = None
     init_supabase_error = f"Ocurrió un problema al conectarse al almacenamiento de datos: {e}"
@@ -59,30 +59,25 @@ st.set_page_config(
 if "supabase_error" not in st.session_state:
     st.session_state.supabase_error = init_supabase_error
 
-# ================== FUNCIONES HTTP → BRIDGE MQTT (NO TOCAR ENVÍO) ==================
-def debug_http(payload: dict):
-    debug_text = (
-        "===== DEBUG HTTP → BRIDGE MQTT =====\n"
-        f"BRIDGE_URL: {BRIDGE_URL}\n"
-        f"JSON:       {payload}\n"
-        "====================================\n"
-    )
-    print(debug_text)
-    st.sidebar.code(debug_text, language="text")
-
+# ================== FUNCIONES HTTP → BRIDGE MQTT (ENVÍO, SIN VENTANA DEBUG) ==================
 def call_bridge(cmd_type: str, value: Optional[str] = None):
     payload = {"type": cmd_type}
     if value is not None:
         payload["value"] = value
 
-    debug_http(payload)
+    # Solo log a consola (para debug técnico)
+    print("===== HTTP → BRIDGE MQTT =====")
+    print(f"URL: {BRIDGE_URL}")
+    print(f"JSON: {payload}")
+    print("================================")
 
     try:
         resp = requests.post(BRIDGE_URL, json=payload, timeout=5)
         if resp.status_code != 200:
-            st.sidebar.error(f"Bridge respondió {resp.status_code}: {resp.text}")
+            st.sidebar.error(f"Bridge respondió {resp.status_code}")
         else:
-            st.sidebar.success(f"Bridge OK: {resp.json()}")
+            # Si quieres menos ruido, comenta esta línea
+            st.sidebar.success("Comando enviado correctamente.")
     except Exception as e:
         st.sidebar.error(f"Error llamando al bridge: {e}")
 
@@ -101,11 +96,13 @@ def send_fan_pwm(pct: int):
 def send_recal():
     call_bridge("recal", None)
 
-# ================== QUERIES A SUPABASE (POR MÉTRICA) ==================
-# -- Real time: 4 consultas (1 por métrica) cada ~10 s --
+# ================== QUERIES A SUPABASE (POR MÉTRICA, SIN CACHE EN RT) ==================
 
-@st.cache_data(ttl=10)  # se re-ejecuta como máximo cada 10 s
 def load_metric_window(metric: str, minutes: int, device_id: Optional[str]):
+    """
+    Datos últimos N minutos para UNA métrica.
+    Sin cache para que siempre lea lo más reciente.
+    """
     if not sb_client:
         return []
     now_utc = datetime.now(timezone.utc)
@@ -123,10 +120,11 @@ def load_metric_window(metric: str, minutes: int, device_id: Optional[str]):
         q = q.eq("device_id", device_id)
     return q.execute().data
 
-# -- Estado actual: 4 consultas (1 por métrica) cada ~10 s --
-
-@st.cache_data(ttl=10)
 def load_last_metric(metric: str, device_id: Optional[str]):
+    """
+    Último valor para UNA métrica.
+    Sin cache para que se actualice bien.
+    """
     if not sb_client:
         return None
     q = (
@@ -143,8 +141,7 @@ def load_last_metric(metric: str, device_id: Optional[str]):
         return None
     return data[0]
 
-# -- Histórico (puede seguir siendo 1 consulta) --
-
+# Histórico puede quedar cacheado porque no es tan crítico que cambie al segundo
 @st.cache_data(ttl=30)
 def load_history(from_iso: str, device_id: Optional[str]):
     if not sb_client:
@@ -173,7 +170,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Filtros")
 
-    # Si quieres permitir filtrar por dispositivo, lo usamos pero NO se muestra en el gráfico
+    # Permite filtrar por dispositivo, pero NO se muestra en el gráfico
     filter_device = st.text_input("Identificador de dispositivo (opcional)", value="")
 
     filter_metric_rt = st.multiselect(
@@ -188,7 +185,7 @@ with st.sidebar:
     hist_hours = st.slider("Ventana histórica (horas)", 1, 72, 24)
 
     st.markdown("---")
-    st.markdown("### Control del sistema (comandos)")
+    st.markdown("### Control del sistema")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -215,8 +212,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption(
-        f"Conexión a servicios internos establecida.\n"
-        f"Almacenamiento de datos: `{'configurado' if SUPABASE_URL else 'no configurado'}`"
+        "Almacenamiento de datos: "
+        f"`{'configurado' if SUPABASE_URL else 'no configurado'}`"
     )
 
 # ================== HEADER ==================
@@ -255,7 +252,6 @@ with col_rt:
         msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
         st.warning(msg)
     else:
-        # 4 consultas, una por variable (lo que pediste)
         dfs = []
         for metric in filter_metric_rt:
             data_m = load_metric_window(metric, minutes=3, device_id=filter_device or None)
@@ -272,7 +268,6 @@ with col_rt:
             df_rt["ts_dt"] = pd.to_datetime(df_rt["ts"], utc=True)
             df_rt = df_rt.sort_values("ts_dt")
             df_rt["ts_local"] = df_rt["ts_dt"].dt.tz_convert("America/Lima")
-
             df_rt["metric_name"] = df_rt["metric"].map(metric_label)
 
             fig_rt = px.line(
@@ -280,7 +275,6 @@ with col_rt:
                 x="ts_local",
                 y="value",
                 color="metric_name",
-                # NO mostramos device_id ni nombres de columnas crudos
                 hover_data={"ts_local": True, "value": True, "metric_name": True},
                 labels={
                     "value": "Valor medido",
@@ -303,19 +297,17 @@ with col_rt:
 
 # ================== ESTADO ACTUAL (4 SELECTS) ==================
 with col_cards:
-    st.subheader("🔎 Estado actual (actualización cada 10 s)")
+    st.subheader("🔎 Estado actual (actualización frecuente)")
 
     if not sb_client:
         msg = st.session_state.supabase_error or "El almacenamiento de datos no está configurado."
         st.warning(msg)
     else:
-        # 4 consultas: una por cada variable de interés
-        last_temp = load_last_metric("temp_c", filter_device or None)
+        last_temp = load_last_metric("temp_c",  filter_device or None)
         last_hum  = load_last_metric("hum_pct", filter_device or None)
         last_co   = load_last_metric("co_raw",  filter_device or None)
         last_voc  = load_last_metric("voc_raw", filter_device or None)
 
-        # Determinar el timestamp más reciente disponible
         ts_candidates = [
             pd.to_datetime(x["ts"], utc=True) for x in
             [last_temp, last_hum, last_co, last_voc] if x is not None
@@ -329,9 +321,9 @@ with col_cards:
             st.markdown(f"**Última actualización:** {last_ts_local.strftime('%Y-%m-%d %H:%M:%S')}")
 
             temp_val = last_temp["value"] if last_temp else None
-            hum_val  = last_hum["value"] if last_hum else None
-            co_val   = last_co["value"] if last_co else None
-            voc_val  = last_voc["value"] if last_voc else None
+            hum_val  = last_hum["value"]  if last_hum  else None
+            co_val   = last_co["value"]   if last_co   else None
+            voc_val  = last_voc["value"]  if last_voc  else None
 
             c1, c2 = st.columns(2)
             with c1:
@@ -430,5 +422,6 @@ else:
         st.error(f"Ocurrió un problema al consultar los datos históricos: {e}")
 
 # ================== AUTO-REFRESH ==================
-if auto_refresh and hasattr(st, "autorefresh"):
+if auto_refresh:
+    # Cada refresh_secs segundos se vuelve a ejecutar TODO el script
     st.autorefresh(interval=refresh_secs * 1000, key="rt_autorefresh")
