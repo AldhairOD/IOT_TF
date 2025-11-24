@@ -426,4 +426,4 @@ if auto_refresh:
     # Espera la cantidad de segundos elegida
     time.sleep(refresh_secs)
     # Vuelve a ejecutar TODO el script (vuelve a consultar Supabase)
-    st.experimental_rerun()
+    st.rerun()
